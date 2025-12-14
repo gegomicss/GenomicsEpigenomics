@@ -1,0 +1,770 @@
+---
+title: "Fitness Correction Project"
+author: "Gegomicss"
+date: "2022-09-22"
+output: 
+  rmarkdown::html_document:
+    highlight: pygments
+    toc: true
+    toc_depth: 5
+    fig_width: 5
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+  
+  ## 1. Background 
+  
+**Transposon insertion sequencing** (Tn-Seq) is a high-throughput technique used for the **identification of essential genes** under an experimental condition. A feature of the Tn-seq data is that mutants carrying insertions in such genes are expected to be greatly depleted in the growth culture.
+
+Tn-Seq identifies genes that affect the **fitness** of a microorganism in a certain condition. Fitness is the **relative value** that measures the difference in the reproductive and survival capacity of a genotype in a given environment and compared to another organism of the same specie. In terms of genetic heritage, the concept of fitness is used to quantify how the contribution that an individual of a certain specie is capable of *transmitting* to subsequent generations.
+
+Every Tn-Seq screen begins with a library of mutagenized cells which corresponds a transposon insertion. 
+The **transposon** is a DNA segment that once it's inserted into a gene, it disrupts the gene and renders the cell disfunctional in that specific gene. The libraries we obtain are made of many cells disrupted in different locations and different genes. 
+
+After the library detection we grow cells under different conditions, we extract the genomic DNA of the mutagenized bacterial cells and enrich for our region of interest (transposon genomic DNA junctions). 
+
+As a final step we sequence these regions.
+
+## 2. Introduction
+
+The library we're studying here comes from a Tn-seq experiment applied to *Streptococcus pneumoniae* which is an opportunistic pathogen that is a common cause of serious invasive diseases such as pneumonia, bacteremia, meningitis, and otitis media.
+
+The data obtained from a massively parallel sequencing on the Illumina platform, allowed us to identify the location of each transposon insertion and also to study all the changes in frequency for the insertion mutants.
+Considering that nucleotides nearby the origin of replication had a systematic replication bias which gave as result a higher sequencing frequency (due to the *replication process*).
+
+The goal of this project was to remove this bias from the data obtained from the sequencing step. 
+
+**Reference article:** van Opijnen T, Bodi KL, Camilli A. Tn-seq: high-throughput parallel sequencing for fitness and genetic interaction studies in microorganisms. Nat Methods. 2009 Oct;6(10):767-72. doi: 10.1038/nmeth.1377
+
+## 3. Pipeline Workflow
+
+Here we presented the pipeline workflow of the project, step by step. Starting from the manipulation of the data, in order to manage better the downstream analysis, until the detection of a correct model fitting and correction of the fitness.
+
+#### Step 1. Set the working directory
+
+```{r,message=FALSE, warning=FALSE}
+setwd("/Volumes//")
+```
+
+#### Step 2. Libraries required
+
+Attaching all the libraries required for the downstream analysis.
+
+```{r,message=FALSE, warning=FALSE}
+library(ggplot2)
+library(GenomicRanges)
+library(jcolors)
+library(dplyr)
+library(plotrix)
+```
+
+#### Step 3. Pre-processing
+
+Our input files are in *.txt* format: they contain all the information about our genes (*fitness* and *genomic positions*, *fitness*, *locus* etc..). We load our tables in R.
+
+```{r, message=FALSE, warning=FALSE}
+### Loading genome info from .txt files  
+fitnessData<-read.delim("/Volumes//TNseq_correction/Tn_seq_fitness_data_Opijnen_et_al_2009.txt",header=TRUE,stringsAsFactors = FALSE,sep = "\t")
+head(fitnessData)
+
+geneCoord<-read.delim("/Volumes//TNseq_correction/GCF_000006885.1_ASM688v1_genomic_olt.txt",header=FALSE,stringsAsFactors = FALSE,sep = "\t", col.names=c('locus','start','end'))
+head(geneCoord)  #with locus positions
+```
+Checking the data we noticed some NAs present, so we need to drop them out.
+
+```{r, message=FALSE, warning=FALSE}
+### Merge Data
+mergedData<- merge(fitnessData, geneCoord, by = 'locus')
+#head(mergedData)
+
+### Check if NAs 
+NA_Check <- apply(mergedData, 1, function(x){any(is.na(x))}) 
+### Dropping NAs - filtering data
+filteredData <- mergedData[!NA_Check,]
+```
+
+We create a Genomic Ranges format converting the Dataframe, in order to manage the data more quickly and simply.
+
+```{r, message=FALSE, warning=FALSE}
+### Creating a GRanges object
+GRangesData<- makeGRangesFromDataFrame(filteredData,
+                                       # Rle("chr", nrow(filteredData)),
+                                       keep.extra.columns=TRUE,
+                                       seqnames.field="locus",
+                                       start.field="start",
+                                       ignore.strand=TRUE,
+                                       end.field="end",
+                                       starts.in.df.are.0based=FALSE,
+)
+### Drop usefulness columns
+mcols(GRangesData)$N_insertions <- NULL
+mcols(GRangesData)$sem <- NULL
+mcols(GRangesData)$sd <- NULL
+```
+
+Now we are going to add a column in our filtered data in which we detect for each gene the belonging category by fitness. 
+According to the paper, genes were divided into four categories in this way:
+  
+  \- neutral (fitness = 0.96-1.04)\
+- advantageous (fitness \> 1.04)\
+- disadvantageous (fitness \< 0.96)\
+- possibly essential (fitness = 0), where transposon insertions were absent in the sequenced library.
+
+So we divided in ranges the fitness values and for each gene we defined the genomic coordinate as the middle point of the gene.
+We reproduced the categorization of the genes in this way: 
+  
+```{r, message=FALSE, warning=FALSE}
+### Take the index position for each range
+indexDISADV<-which(GRangesData$average_fitness>0 & GRangesData$average_fitness<0.96)
+indexNEUTR<-which(GRangesData$average_fitness>=0.96 & GRangesData$average_fitness<1.04)
+indexADV<-which(GRangesData$average_fitness>=1.04)
+### Creates a new column of NAs
+GRangesData$GeneCategory <- NA
+### Attach to each position the corresponding gene category
+for (i in indexDISADV){
+  GRangesData$GeneCategory[i]<-'Disadvantageous'
+}
+for (i in indexNEUTR){
+  GRangesData$GeneCategory[i]<-'Neutral'
+}
+for (i in indexADV){
+  GRangesData$GeneCategory[i]<-'Advantageous'
+}
+head(GRangesData)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+### Adding some suggested information needed
+geneCoord<-(filteredData$start+filteredData$end)/2
+fitness_avg<-filteredData$average_fitness
+GenomeLength<-max(filteredData$end)
+GRangesData$radians <- geneCoord*2*pi/GenomeLength
+GRangesData$geneCoord <- geneCoord
+### Data frame used to plot 
+df<-data.frame(Coordinates=GRangesData$geneCoord,AvgFitness=fitness_avg,
+               GeneCategory=GRangesData$GeneCategory)
+head(df)
+```
+
+**DATA VISUALIZATION**
+  
+  We can finally have a first representation of 'GeneCategories' (Before Fitness Correction) plotted with the genome coordinates on the X axis. The linearised genome has this distribution of fitness:
+  
+```{r, message=FALSE, warning=FALSE}
+### Better visualization of the plot divided by category
+ggplot(df, aes(x=Coordinates, y=AvgFitness)) +
+  xlab("Coordinates") + ylab("Avgerage Fitness")+
+  ggtitle('Fitness plot')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  geom_point(size=0.5, aes(color=GeneCategory)) +
+  scale_color_manual(values = c(Advantageous="#3366FF", Neutral="black", Disadvantageous= "grey" ))+
+  geom_smooth(size=0.7,color='red') +
+  ylim(0.5, 1.5)
+```
+
+The distribution of the fitness is showed as a '*smile shape*' on the genome. As said previously this happens because genome regions proximal to the origin of replication are present on average in a higher number of copies than distal ones (replication bias).
+
+**Adding some rewuired data in our dataframe**
+  
+  Due to the circular genome (replicated in both directions), one way to study this particular trend is by fitting a regression model, splitting the genome in smaller window sizes.
+
+Here we first obtained some values such as the middle coordinate and the radians which have been added to a new dataframe obtained by detecting the overlapped the coordinates of the genes in the windows:
+  
+```{r, message=FALSE, warning=FALSE}
+### Start defining the window size to split
+WinSize<-100000                         # size of the windows we want to get
+Length<- max(end(GRangesData))          # genome length
+Start<- min(start(GRangesData))         # the starting point is the minimum start position
+midCoord<-(Length+Start)/2              # middle gene coord (X)
+
+### Vector with genomic windows coordinates used in the new dataframe
+GenWindow<- c(seq(from=0, to=Length, by=WinSize),Length)
+```
+
+```{r, message=FALSE, warning=FALSE}
+### Gene-Window association and Detection of a New Dataframe
+
+#Create window ranges
+CutWin<-cut(GRangesData$geneCoord,GenWindow)
+#Create a NewDataFrame with the fitness, window, coord, radians
+Dataframe<-data.frame("fitness"=GRangesData$average_fitness,"window"=CutWin, "coord"=GRangesData$geneCoord, "radians"=GRangesData$radians)
+
+#Grouping by window, calculate the average fitness associated to each one
+DataframeMidCoord<-Dataframe %>% group_by(window) %>% summarise(avgFit=mean(fitness)) 
+
+#Adding the coord, and radians columns: use middle position for each window
+MiddlePosition<-GenWindow+WinSize/2
+#length(MiddlePosition)
+
+#Removing elements at specific indices (the last one), obtaining equal ranges and sizes
+MiddlePosition<-MiddlePosition[-(23)]
+#Adding the MiddlePosition column to the data frame
+DataframeMidCoord$MiddlePosition<-MiddlePosition
+
+#Adding Middle Radians column
+MidRadians <- MiddlePosition*2*pi/GenomeLength    
+#midRadians<-midRadians[-(23)]    # Not needed because MiddlePosition is already 22 length
+DataframeMidCoord$MidRadians<-MidRadians
+
+### MyNewDataFrame
+head(DataframeMidCoord)
+```
+Obtained all the new columns and corresponding positions and fitnesses for each window size, we compared the smooth on global values and the smooth of each window size:
+  
+```{r, message=FALSE, warning=FALSE}
+### Compare original values, mean over the windows, and smoothing function
+ggplot()+geom_point(data=Dataframe,aes(x=coord,y=fitness))+
+  geom_line(data=DataframeMidCoord,aes(x=DataframeMidCoord$MiddlePosition,y=DataframeMidCoord$avgFit,color="smooth  on each window"),size=1)+
+  geom_smooth(data=DataframeMidCoord,aes(x=DataframeMidCoord$MiddlePosition,y=DataframeMidCoord$avgFit,color="original smooth"),method="loess",size=0.5)+
+  scale_color_manual(values=c("#3366FF","red"))+
+  labs(colour="")+
+  theme(legend.position = "bottom")
+```
+
+
+And then we plotted the 'new' data by considering the average fitness of each MiddlePosition for each window, as required:
+  
+```{r}
+# Plotting the fitness among genome coordinates (Before correction)
+ggplot(DataframeMidCoord,aes(x=MiddlePosition,y=avgFit))+geom_point()+
+  ylim(0.5,1.5)+geom_smooth()
+```
+
+#### Step 4. Model Fitting
+
+At this point we start the study of the trend finding a good model fitting of the data, in order to correct this replication bias. 
+
+To test our data we can split the data in 2 parts (by genomic coordinates) and use one part to train and another to test them. We took into consideration the linear coordinates and then we evaluated if the gene category changes in the corrected data. We fitted a Regression Model for the train/test sets.
+
+```{r}
+### Split the data in two:Define TRAIN and TEST datasets
+df$ScaledCoord<-df$Coordinates/1e6
+### Samples of the specified size from df, using either with or without replacement.
+Train<-sample(nrow(df),size =nrow(df)/2+1)
+Train<-sort(Train)
+Test<-df[-Train,]
+Train<-df[Train,] 
+
+head(Train)
+head(Test)
+
+#table(Train$GeneCategory)
+#table(Test$GeneCategory)
+```
+
+##### 4.1 Linear Coordinates
+
+Train the Linear Regression model in the first half and then in the second.
+
+```{r, message=FALSE, warning=FALSE}
+### Linear Regression: Train 
+TrainLR<-lm(Train$AvgFitnes~ScaledCoord+I(ScaledCoord^2),data=Train)
+summary(TrainLR)
+plot(TrainLR)
+```
+
+```{r, message=FALSE, warning=FALSE}
+shapiro.test(TrainLR$residuals)
+```
+
+```{r}
+### Plotting the Train data (Train or TrainLR) BEFORE CORRECTION
+beforeCorrectionPlot<-ggplot()+geom_point(aes(x=Coordinates,y=AvgFitness),data=Train)+
+  geom_line(aes(x=Train$Coordinates,y=TrainLR$fitted.values,color="fitted values"),size=1)+
+  labs(colour="")
+beforeCorrectionPlot
+```
+
+It seems they fit well on this model.
+
+##### 4.2 Fitness Correction
+**Predict first half (train)**
+  
+  The fitness predicted by this model is now computed for the windows of the first half:
+  
+```{r}
+### Predict first half (train)
+FirstPrediction <- predict(TrainLR, Train)
+### MSE
+mean((FirstPrediction - Train$AvgFitness)^2)
+```
+
+A Low MSE indicates a good fit of the train data. Now we're going to inspect the Test.
+
+```{r}
+### Training the second Half
+TestLR<-lm(AvgFitness~ScaledCoord+I(ScaledCoord^2),data=Test)
+summary(TestLR)
+plot(TestLR)
+```
+
+**Predict second half (test)**
+Since the data are specular, we expect to obtain a similar value for MSE:
+```{r}
+### Predict SeconD half (Test)
+SecondPrediction <- predict(TestLR, Test)
+### MSE
+mean((SecondPrediction - Test$AvgFitness)^2)
+```
+
+As before, the lower MSE indicates a good fit also for the second part of the genome.\
+Since the fit is nice, this suggests us to use this model to **correct the fitness values**.
+
+**Correction of fitness values based on linear model**
+
+```{r,message=FALSE, warning=FALSE}
+### Correct fitness values based on linear model
+Train$CorrectedFitness <- Train$AvgFitness - FirstPrediction + 1
+Test$CorrectedFitness <- Test$AvgFitness - SecondPrediction + 1
+
+### Concatenate the two halves
+CorrectedData <- rbind(Train, Test)
+```
+
+Here we got again the indexes of each range of 'CorrectedFitness' and add a 'GeneCategory' column to get the new categories both in Train and Test:
+
+```{r,message=FALSE, warning=FALSE}
+TrainCorr<-Train
+### Drop usefulness columns
+TrainCorr$GeneCategory <- NULL
+#head(TrainCorr)
+
+### Take the index position for each range
+indexDISADV<-which(TrainCorr$CorrectedFitness>0 & TrainCorr$CorrectedFitness<0.96)
+indexNEUTR<-which(TrainCorr$CorrectedFitness>=0.96 & TrainCorr$CorrectedFitness<1.04)
+indexADV<-which(TrainCorr$CorrectedFitness>=1.04)
+# Creates a new column of NAs
+TrainCorr$GeneCategory <- NA
+# Attach to each position the corresponding gene category
+for (i in indexDISADV){
+  TrainCorr$GeneCategory[i]<-'Disadvantageous'
+}
+for (i in indexNEUTR){
+  TrainCorr$GeneCategory[i]<-'Neutral'
+}
+for (i in indexADV){
+  TrainCorr$GeneCategory[i]<-'Advantageous'
+}
+head(TrainCorr)
+```
+
+```{r,message=FALSE, warning=FALSE}
+TestCorr<-Test
+#Drop usefulness columns
+TestCorr$GeneCategory <- NULL
+#head(TestCorr)
+
+# Take the index position for each range
+indexDISADV<-which(TestCorr$CorrectedFitness>0 & TestCorr$CorrectedFitness<0.96)
+indexNEUTR<-which(TestCorr$CorrectedFitness>=0.96 & TestCorr$CorrectedFitness<1.04)
+indexADV<-which(TestCorr$CorrectedFitness>=1.04)
+# Creates a new column of NAs
+TestCorr$GeneCategory <- NA
+# Attach to each position the corresponding gene category
+for (i in indexDISADV){
+  TestCorr$GeneCategory[i]<-'Disadvantageous'
+}
+for (i in indexNEUTR){
+  TestCorr$GeneCategory[i]<-'Neutral'
+}
+for (i in indexADV){
+  TestCorr$GeneCategory[i]<-'Advantageous'
+}
+
+#table(Test$GeneCategory)
+#table(TestCorr$GeneCategory)
+```
+
+##### 4.3 Visualization data
+
+**The Before/After fitness correction in TRAIN.**
+
+Once retrieved the *corrected the fitness values of the genes* in the previous steps, we made some plots to see if those new data changed something on the fitness trend. We expected, in both Train and Test data, the **smile effect to disappear**, and this is the result (plot both Before/After before in TRAIN and then in TEST):
+
+```{r,message=FALSE, warning=FALSE}
+### BEFORE CORRECTION PLOT: 
+beforeCorrectionPlotTRAIN<-ggplot(data=Train,aes())+
+  geom_point(aes(x=Coordinates, y=AvgFitness),show.legend = F)+
+  labs(title="Before Correction")+theme_minimal()+
+  geom_smooth(aes(x=Coordinates, y=AvgFitness),method = "loess")
+beforeCorrectionPlotTRAIN
+
+### Fitting Correction 'LOESS METHOD' 
+afterCorrectionPlotTRAIN<-ggplot(data=TrainCorr,aes())+
+  geom_point(aes(x=Coordinates, y=CorrectedFitness),show.legend = F)+
+  labs(title="After Correction")+theme_minimal()+
+  geom_smooth(aes(x=Coordinates, y=CorrectedFitness),method = "loess")
+afterCorrectionPlotTRAIN
+
+
+#plot_grid(beforeCorrectionPlotTRAIN, afterCorrectionPlotTRAIN, ncol=2, label_x=0,
+#            labels=c('Before correction', 'After correction'))
+```
+
+
+**The Before/After fitness correction in TEST**
+
+```{r,message=FALSE, warning=FALSE}
+###BEFORE CORRECTION PLOT:: Fitting Correction 'LOESS METHOD' 
+beforeCorrectionPlotTEST<-ggplot(data=Test,aes())+
+  geom_point(aes(x=Coordinates, y=AvgFitness),show.legend = F)+
+  labs(title="Before Correction TEST")+theme_minimal()+
+  geom_smooth(aes(x=Coordinates, y=AvgFitness),method = "loess")
+beforeCorrectionPlotTEST
+
+# Fitting Correction 
+afterCorrectionPlotTEST<-ggplot(data=TestCorr,aes())+
+  geom_point(aes(x=Coordinates, y=CorrectedFitness),show.legend = F)+
+  labs(title="After Correction TEST")+theme_minimal()+
+  geom_smooth(aes(x=Coordinates, y=CorrectedFitness),method = "loess")
+afterCorrectionPlotTEST
+
+#plot_grid(beforeCorrectionPlotTEST, afterCorrectionPlotTEST, ncol=2, label_x=0,
+#            labels=c('Test Before correction', 'Test After correction'))
+```
+
+**Visualization of Genes Category Before/After Correction**
+
+In this last plot it is clearly visible the difference found between the 2 different moments.
+
+```{r,message=FALSE, warning=FALSE}
+#Before correction plot, divided by gene category
+CategoriesBefore<-ggplot(df, aes(x=Coordinates, y=AvgFitness)) +
+    xlab("Coordinates") + ylab("Avgerage Fitness")+
+    ggtitle('Before')+
+#    theme(plot.title = element_text(hjust = 0.5))+
+    geom_point(size=0.5, aes(color=GeneCategory)) +
+    scale_color_manual(values = c(Advantageous="red", Neutral="black", Disadvantageous= "grey" ))+
+    geom_smooth(size=0.7,color='#3366FF') +
+ylim(0.5, 1.5)
+CategoriesBefore
+
+#After correction plot, divided by gene category
+CorrectedData <- rbind(TrainCorr, TestCorr)
+CategoriesAfter<-ggplot(CorrectedData, aes(x=Coordinates, y=CorrectedFitness)) +
+  xlab("Coordinates") + ylab("Corrected Fitness")+
+  ggtitle('After')+
+  #    theme(plot.title = element_text(hjust = 0.5))+
+  geom_point(size=0.5, aes(color=GeneCategory)) +
+  scale_color_manual(values = c(Advantageous="red", Neutral="black", Disadvantageous= "grey" ))+
+  geom_smooth(size=0.7,color='#3366FF') +
+  ylim(0.5, 1.5)
+CategoriesAfter
+
+#plot_grid(CategoriesBefore, CategoriesAfter, ncol=2, label_x=0,
+#            labels=c('Before correction', 'After correction'))
+
+```
+
+Fitting correctly the model to the corrected fitness, here we can see the differences between categories!
+  
+  **Inspect the data:** 
+  A pie chart categorizing every gene's fitness in the *S.Pneumoniae* genome into our three categories.
+
+```{r, fig.show='hide'}
+### BEFORE CORRECTION
+
+### Counting genes per category
+categ<-table(df$GeneCategory)
+
+### Assign categories
+lbls <- c("Advantageous", "Disadvantageous", "Neutral") #used for labels
+
+### To see where the labels have been placed
+bc<-pie3D(categ,radius=0.9,labels=lbls,main="Gene Categories Before Correction", col=c("red", "white", "#3366FF"),labelcol = "#000000",labelcex = 0.75)
+#bc #tips: positions to modify for a better visualization: 0.4899365 1.3398263 3.9914825
+
+### 3D Exploded Pie Chart
+# Changing position to labels, avoiding overlaps with the pie chart
+bc[1]<-0.5
+bc[2]<-1.5
+bc[3]<-4.5
+```
+
+```{r}
+pie3D(categ,radius=0.9,labels=lbls,explode=0.1,main="Gene Categories Before Correction", col=c("red", "white", "#3366FF"),labelcol = "#000000",labelcex = 0.75,labelpos=bc)
+```
+
+```{r, fig.show='hide'}
+### AFTER CORRECTION
+
+### Counting genes per category
+categAfter<-table(CorrectedData$GeneCategory)
+
+### 3D Exploded Pie Chart
+# Changing position to labels, avoiding overlaps with the pie chart
+bc[1]<-0.5
+bc[2]<-1.5
+bc[3]<-4.5
+```
+
+```{r}
+pie3D(categAfter,radius=0.9,labels=lbls,explode=0.1,main="Gene Categories Before Correction", col=c("red", "white", "#3366FF"),labelcol = "#000000",labelcex = 0.75,labelpos=bc)
+```
+
+**Barplot of category changes**
+
+```{r}
+### Create a df with the data I obtained
+table(df$GeneCategory)
+
+table(CorrectedData$GeneCategory)
+
+mydf <- data.frame( Advantageous=c(Before=245, After=145), Neutral=c(1146,1244), Disadvantageous=c(180,182) )
+barplot(t(as.matrix(mydf)), beside=TRUE,  # Grouped bars
+        xlab = "categories", ylab = "Counting genes",
+        col = c("darkgrey", "darkblue", "red"),
+        legend.text = colnames(mydf),
+        args.legend = list(x = "topright", inset = c(-0.20, 0))) # Legend arguments
+```
+
+Most of the genes fall into the neutral category in both Before and After cases, and in particular after correction we have an increase of those genes in the neutral category, a decreasing 'Advantageous' category and a little increase on 'Disadvantageous' category.
+
+The corrected Fitness must detect the corrected values for each gene. 
+
+#### Step 5. Model fitting in Radians convertion
+
+At this point, the model seems to fit nicely on our corrected data considering the "splitting genome method". 
+Here we show another way to study this correction, taking into consideration the fact that here we have a circular genome: the convertion to radians. To study the distribution of the cloud fitness, we (previously) transformed each gene middle point position (bp) into radians and computed the circular statistics.
+
+The downstream analysis will proceed on the same 'ideal way' as before: model fitting, fitness correction and data visualization.
+
+##### 5.1 Linear Model on Radians data
+```{r}
+### Use DataframeMidCoord dataframe with the radians column
+RadiansModel <- lm(Dataframe$fitness ~ sin(Dataframe$radians) + cos(Dataframe$radians),
+                   data=Dataframe)
+summary(RadiansModel)
+```
+
+Considering both sin and cos, we obtained a significance only with the cosine for this reason we choose this one:
+
+```{r}
+RadiansModel<-lm(Dataframe$fitness~cos(Dataframe$radians),data=Dataframe)
+summary(RadiansModel)
+```
+
+##### 5.2 Fitness Correction
+We saw the significance of the model, and after that we applied the prediction:
+
+```{r}
+### Predict on Radians
+RadPrediction <- predict(RadiansModel, Dataframe)
+### MSE
+mean((RadPrediction - Dataframe$fitness)^2)
+```
+
+A Low MSE indicates a good fit of the data. 
+
+Now we add to the dataframe the column of corrected fitness calculated for each gene:
+
+```{r,message=FALSE, warning=FALSE}
+### Correct fitness values based on linear model
+Dataframe$CorrectedFitness <- Dataframe$fitness - RadPrediction +1
+head(Dataframe)
+```
+
+##### 5.3 Visualization data
+
+```{r,message=FALSE, warning=FALSE}
+### DETECTING GENE CATEGORIES BEFORE CORRECTION (from Dataframe)
+
+#Drop usefulness columns
+Dataframe$GeneCategory <- NULL
+
+# Take the index position for each range
+indexDISADV<-which(Dataframe$fitness>0 & Dataframe$fitness<0.96)
+indexNEUTR<-which(Dataframe$fitness>=0.96 & Dataframe$fitness<1.04)
+indexADV<-which(Dataframe$fitness>=1.04)
+
+# Creates a new column of NAs
+Dataframe$GeneCategory <- NA
+
+# Attach to each position of Dataframe$GeneCategory the corresponding gene category
+for (i in indexDISADV){
+  Dataframe$GeneCategory[i]<-'Disadvantageous'
+}
+for (i in indexNEUTR){
+  Dataframe$GeneCategory[i]<-'Neutral'
+}
+for (i in indexADV){
+  Dataframe$GeneCategory[i]<-'Advantageous'
+}
+
+```
+
+```{r,message=FALSE, warning=FALSE}
+### DETECTING GENE CATEGORIES AFTER CORRECTION adding a new column to the data frame (GeneCatAfter)
+
+# Take the index position for each range
+indexDISADV<-which(Dataframe$CorrectedFitness>0 & Dataframe$CorrectedFitness<0.96)
+indexNEUTR<-which(Dataframe$CorrectedFitness>=0.96 & Dataframe$CorrectedFitness<1.04)
+indexADV<-which(Dataframe$CorrectedFitness>=1.04)
+
+# Creates a new column of NAs
+Dataframe$GeneCatAfter <- NA
+# Attach to each position of Dataframe$GeneCatAfter the corresponding gene category
+for (i in indexDISADV){
+  Dataframe$GeneCatAfter[i]<-'Disadvantageous'
+}
+for (i in indexNEUTR){
+  Dataframe$GeneCatAfter[i]<-'Neutral'
+}
+for (i in indexADV){
+  Dataframe$GeneCatAfter[i]<-'Advantageous'
+}
+
+head(Dataframe)
+```
+
+```{r,message=FALSE, warning=FALSE}
+### Before correction plot, divided by gene category
+CategoriesBeforeRadians<-ggplot(Dataframe, aes(x=radians, y=fitness)) +
+    xlab("Radians") + ylab("Avgerage Fitness")+
+    ggtitle('Before Correction')+
+    geom_smooth()+
+    theme(plot.title = element_text(hjust = 0.5))+
+    geom_point(size=0.5, aes(color=GeneCategory)) +
+    scale_color_manual(values = c(Advantageous="red", Neutral="black", Disadvantageous= "grey" ))+
+    geom_smooth(size=0.7,color='#3366FF') +
+ylim(0.5, 1.5)
+CategoriesBeforeRadians
+
+### After correction plot, divided by gene category
+CategoriesAfterRadians<-ggplot(Dataframe, aes(x=radians, y=CorrectedFitness)) +
+  xlab("Radians") + ylab("Corrected Fitness")+
+  ggtitle('After Correction')+
+  geom_smooth()+
+  geom_point(size=0.5, aes(color=GeneCatAfter)) +
+  scale_color_manual(values = c(Advantageous="red", Neutral="black", Disadvantageous= "grey" ))+
+  geom_smooth(size=0.7,color='#3366FF') +
+  ylim(0.5, 1.5)
+CategoriesAfterRadians
+
+### Plot together
+#library(gridExtra)
+#grid.arrange(CategoriesBeforeRadians,CategoriesAfterRadians,ncol=2,
+#         top=textGrob("Before and After Fitness Correction",
+#                      gp=gpar(fontsize=16,font=1)))
+
+
+```
+
+
+
+```{r}
+### Plotting the fitness among genome coordinates (Before correction)
+P1<-ggplot(Dataframe,aes(x=radians,y=fitness))+geom_point()+ylim(0.5,1.50)+geom_smooth()+ ggtitle('Before Correction')
+P1
+### AFTER CORRECTION
+P2<-ggplot(Dataframe,aes(x=radians,y=CorrectedFitness))+geom_point()+
+  ylim(0.5,1.50)+geom_smooth()+ ggtitle('After Correction')
+P2
+
+### Plot together
+#grid.arrange(P1,P2,ncol=2,
+#         top=textGrob("Before and After Fitness Correction",
+#                      gp=gpar(fontsize=16,font=1)))
+```
+
+
+**Visualization of category change**
+  
+```{r}
+### Before
+table(Dataframe$GeneCategory)
+
+### After
+table(Dataframe$GeneCatAfter)
+
+### Create a dataframe with the data we obtained
+mydf <- data.frame( Advantageous=c(Before=245, After=139), Neutral=c(1146,1258), Disadvantageous=c(180,174) )
+barplot(t(as.matrix(mydf)), beside=TRUE,  # Grouped bars
+        xlab = "categories", ylab = "Counting genes",
+        col = c("darkgrey", "darkblue", "red"),
+        legend.text = colnames(mydf),
+        args.legend = list(x = "topright", inset = c(-0.20, 0))) # Legend arguments
+```
+
+## 4. Gene Ontology Analysis
+
+Since the fitness correction can change the significance for a gene, we investigated the significance of the correction of classification from neutral to advantageous / disadvantageous genes. 
+
+We took from the starting table the IDs (which are the difference made by neutralBefore-advantageousAfter and neutralBefore-disadvAfter):
+
+```{r}
+### Locus symbols column from the beginning data frame filtered
+Dataframe$IDs <- filteredData$locus
+### We selected just the genes that changed from neutral to adv/disadv
+SelectGenesAdv <- Dataframe[Dataframe$GeneCategory=='Neutral' & Dataframe$GeneCatAfter=='Advantageous',]$IDs
+SelectGenesDisadv <- Dataframe[Dataframe$GeneCategory=='Neutral' & Dataframe$GeneCatAfter=='Disadvantageous',]$IDs
+
+GeneDF <- function(col1, col2, column.names) {
+  GeneDF <- data.frame(col1 = rep(max(sapply(list(SelectGenesAdv, SelectGenesDisadv), length))))
+  GeneDF[1:length(col1), 1] <- col1
+  GeneDF[1:length(col2), 2] <- col2
+  colnames(GeneDF) <- column.names
+  
+  return(GeneDF)
+}
+
+GeneDF <- GeneDF(SelectGenesAdv, SelectGenesDisadv, c("Advantageous","Disdvantageous"))
+
+### Export the results in a .xlsx file
+xlsx::write.xlsx(GeneDF, "GeneList.xlsx", sheetName = "Gene Symbols", row.names = FALSE, col.names = TRUE, append = FALSE)
+```
+
+We obtained the .xlsx file with the 2 columns of advantageous and disadantageous genes: we studied those genes in ShinyGO selecting the *S. Pneumoniae* organism, to associate the corresponding GO-terms. We retrieved a .csv file with all the Pathways of those genes .
+
+From the set of the "advantageous genes", it has been shown that genes are related to 
+
+```{r}
+### Loading tables obtained from ShinyGO ans take a look at the Pathways
+ADV_GO <- read.csv("/Volumes/GoogleDrive/My Drive/University/ADVANCEDgenomicsANDepigenomics/enrichmentADV.csv", sep=",")
+head(ADV_GO)
+
+DISADV_GO<-read.csv("/Volumes/GoogleDrive/My Drive/University/ADVANCEDgenomicsANDepigenomics/enrichmentDISADV.csv", sep=",")
+head(DISADV_GO)
+```
+
+What we also obtained for the Advantageous genes is a Network and a Hierarchical representation of this set in: 
+  
+  * A hierarchical clustering tree summarizing the correlation among significant pathways listed in the Enrichment tab. 
+Pathways with many shared genes are clustered together.
+
+* A Network showing the relationships between enriched pathways.
+
+
+**From Neutral to Advantageous**
+  
+  ![Hierarchical image obtained from ShinyGO, for ADVANTAGEOUS](/Volumes//GO_terms_TreeADV.jpg){width=90%}
+**Network image obtained from ShinyGO, for ADVANTAGEOUS:**
+  
+  ![Network image obtained from ShinyGO, for ADVANTAGEOUS](/Volumes//ADV20.jpeg){width=70%}
+
+
+**From Neutral to Disdvantageous**
+  
+  ![Hierarchical image obtained from ShinyGO, for DISADVANTAGEOUS](/Volumes//GO_terms_TreeDISADV.jpg){width=90%}
+
+![Network image obtained from ShinyGO, for ADVANTAGEOUS](/Volumes//DISADV20.jpeg){width=70%}
+
+
+## 5. Results and Conclusion
+From our starting data we saw that the fitness values appeared to have a 'smile trend' depending on the position on the genome. In particular, closer to the origin of replication, the fitness values increases. 
+We performed a linear regression model on those data, first splitting the genome in two and then converting the data in radians, as suggested.
+
+We were able to correct the fitness values and to investigate, with online tools, our set of genes which changed their 'belonging group' according to the fitness value, used on the article cited in the beginning.
+
+With the gene ontology analysis we identifyied those biological processes, cellular locations and molecular functions that are impacted in the study.
+
+
+
+
+
+
+
